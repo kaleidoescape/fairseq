@@ -6,6 +6,8 @@
 import logging
 from typing import List
 
+import numpy as np
+
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +19,6 @@ def uniform(dataset_sizes: List[int]):
 def temperature_sampling(dataset_sizes, temp):
     total_size = sum(dataset_sizes)
     return [(size / total_size) ** (1.0 / temp) for size in dataset_sizes]
-
 
 def make_temperature_sampling(temp=1.0):
     def sampling_func(dataset_sizes):
@@ -33,6 +34,82 @@ def make_ratio_sampling(ratios):
     return sampling_func
 
 
+def sinkhorn_temperature_sampling(
+        langs, data_params_list, dataset_sizes, temp=1.0
+    ):
+    r"""
+    Convert dataset sizes into a distribution which takes into account both the
+    availability of a particular lang pair together, as well as the
+    availability of a particular lang alone across the pairs. We use the
+    Sinkhorn-Knopp algorithm to convert a matrix of lang pair counts into 
+    a doubly stochastic matrix, which is then converted into the temperature 
+    sampled probabilities. 
+
+    Motivation (section 3.4): https://arxiv.org/abs/2010.11125
+    Sinkhorn-Knopp paper: http://msp.org/pjm/1967/21-2/pjm-v21-n2-p14-s.pdf
+    Our fork of skp: https://github.com/kaleidoescape/sinkhorn_knopp
+    """
+    from sinkhorn_knopp import sinkhorn_knopp as skp
+
+    #fill a matrix with language pair counts across datasets
+    A = np.zeros((len(langs), len(langs))) #(src, tgt)
+    for i, params in enumerate(data_params_list):
+        src_lang, tgt_lang = params['src'], params['tgt']
+        src_idx, tgt_idx = langs.index(src_lang), langs.index(tgt_lang)
+        A[src_idx, tgt_idx] += dataset_sizes[i]
+    logger.info(f"Data counts for {langs}: {A}")
+
+    #if any row is fully 0, we have to remove the lang from both axes because
+    #we need a square matrix with total support to perform sinkhorn-knopp
+    #This will cause us to miss a lang that is ever only used as src or only
+    #used as tgt, but for multiling models, we typically use both directions
+    zero_rows = np.where(~A.any(axis=0))[0]
+    if zero_rows:
+        logger.warning(
+            f"Ignoring all datasets for langs {[langs[i] for i in zero_rows]}"
+            " because this lang is never used as the src")
+    A = np.delete(A, zero_rows, 0)
+    A = np.delete(A, zero_rows, 1)
+    [langs.pop(i) for i in zero_rows]
+    #also if any col is fully 0, we have to remove the lang from both axes 
+    zero_cols = np.where(~A.any(axis=1))[0]
+    if zero_cols:
+        logger.warning(
+            f"Ignoring all datasets for langs {[langs[i] for i in zero_cols]}"
+            " because this lang is never used as the tgt")
+    A = np.delete(A, zero_cols, 0)
+    A = np.delete(A, zero_cols, 1)
+    [langs.pop(i) for i in zero_cols]
+    if zero_rows or zero_cols:
+        logger.info(f"Data counts w/o zero rows & cols for {langs}: {A}")
+
+    #make matrix doubly stochastic (rows and cols each sum to 1)
+    #and convert that into a new probability distrib with temperature
+    sk = skp.SinkhornKnopp()
+    probs = sk.fit(A) ** (1 / temp)
+    probs = probs / sum(probs)
+    logger.info(f"Sinkhorn temperature sampled probs for {langs}: {probs}")
+
+    #get the ratios back for each of the datasets (datasets with langs 
+    #never used for translating into or translating out of get a ratio of 0)
+    ratios = []
+    for params in data_params_list:
+        src_lang, tgt_lang = params['src'], params['tgt']
+        if src_lang not in langs or tgt_lang not in langs:
+            prob = 0 
+        else:
+            src_idx, tgt_idx = langs.index(src_lang), langs.index(tgt_lang)
+            prob = probs[src_idx, tgt_idx]
+        ratios.append(prob)
+
+    return ratios
+
+def make_sinkhorn_temperature_sampling(temp=1.0):
+    def sampling_func(langs, data_params_list, dataset_sizes):
+        return sinkhorn_temperature_sampling(langs, data_params_list, dataset_sizes, temp)
+
+    return sampling_func
+
 class SamplingMethod:
     @staticmethod
     def add_arguments(parser):
@@ -42,7 +119,8 @@ class SamplingMethod:
                 "uniform",
                 "temperature",
                 "concat",
-                "RoundRobin",
+                "RoundRobin", #see translation_multi_simple_epoch.get_batch_iterator
+                "sinkhorn",
             ],
             type=str,
             default="concat",
@@ -52,7 +130,7 @@ class SamplingMethod:
             "--sampling-temperature",
             default=1.5,
             type=float,
-            help="only work with --sampling-method temperature",
+            help="only works with --sampling-method {temperature,sinkhorn}",
         )
 
     @staticmethod
@@ -73,6 +151,10 @@ class SamplingMethod:
             return uniform
         elif args.sampling_method == "temperature" or self.is_adaptive():
             return make_temperature_sampling(float(args.sampling_temperature))
+        elif args.sampling_method == "sinkhorn":
+            return make_sinkhorn_temperature_sampling(
+                float(args.sampling_temperature)
+            )
         else:
             # default to concating all data set together
             return None

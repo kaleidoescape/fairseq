@@ -191,7 +191,7 @@ class MultilingualDatasetManager(object):
             help="whether to include language IDs in samples",
         )
         parser.add_argument(
-            "--enable-reservsed-directions-shared-datasets",
+            "--enable-reversed-directions-shared-datasets",
             default=False,
             action="store_true",
             help="whether to allow datasets be used in reversed directions",
@@ -828,7 +828,7 @@ class MultilingualDatasetManager(object):
     def load_split_langpair_datasets(self, split, data_param_list):
         datasets = []
         langpairs_sharing_datasets = (
-            {} if self.args.enable_reservsed_directions_shared_datasets else None
+            {} if self.args.enable_reversed_directions_shared_datasets else None
         )
         for param in data_param_list:
             ds = self.load_a_dataset(
@@ -947,7 +947,7 @@ class MultilingualDatasetManager(object):
             lang_dirs = [x if len(x) > 1 else (x[0], x[0]) for x in lang_dirs]
             for src, tgt in lang_dirs:
                 assert src is not None or data_category == "mono_dae", (
-                    f"error: src={src}, " "tgt={tgt} for data_category={data_category}"
+                    f"error: src={src}, tgt={tgt} for data_category={data_category}"
                 )
                 # logger.info(f"preparing param for {data_category}: {src} - {tgt}")
                 key = self.get_dataset_key(data_category, src, tgt)
@@ -1011,16 +1011,31 @@ class MultilingualDatasetManager(object):
         sample_ratios = sampling_func(data_sizes) if sampling_func is not None else None
         return sample_ratios
 
+    def get_train_sampling_sinkhorn_ratios(
+        self, data_param_list, datasets, epoch=1, shard_epoch=None
+    ):
+        data_sizes = self.get_train_dataset_sizes(
+            data_param_list, datasets, epoch, shard_epoch
+        )
+        sampling_func = self.sampling_method.sampling_method_selector()
+
+        sample_ratios = sampling_func(self.langs, data_param_list, data_sizes) 
+        return sample_ratios
+
     def get_sampling_ratios(self, data_param_list, datasets, epoch, shard_epoch=None):
         if self.args.sampling_weights_from_file:
             weights = load_sampling_weights(self.args.sampling_weights_from_file)
             sample_ratios = [weights[k] for k, _ in datasets]
             logger.info(
-                "| ignoring --sampling-weights when loadding sampling weights "
+                "| ignoring --sampling-weights when loading sampling weights "
                 f"from file {self.args.sampling_weights_from_file}"
             )
         elif self.args.sampling_weights:
             sample_ratios = [self.args.sampling_weights[k] for k, _ in datasets]
+        elif self.args.sampling_method == 'sinkhorn':
+            sample_ratios = self.get_train_sampling_sinkhorn_ratios(
+                data_param_list, datasets, epoch, shard_epoch
+            )
         else:
             sample_ratios = self.get_train_sampling_ratios(
                 data_param_list, datasets, epoch, shard_epoch
@@ -1042,7 +1057,7 @@ class MultilingualDatasetManager(object):
             split, epoch, shard_epoch=shard_epoch
         )
         langpairs_sharing_datasets = (
-            {} if self.args.enable_reservsed_directions_shared_datasets else None
+            {} if self.args.enable_reversed_directions_shared_datasets else None
         )
         datasets = [
             (
@@ -1103,6 +1118,7 @@ class MultilingualDatasetManager(object):
         )
         if training and split == getattr(self.args, "train_subset", None):
             sample_ratios = self.get_sampling_ratios(data_param_list, datasets, epoch)
+            assert len(datasets) == len(set([d[0] for d in datasets])), f"repeat key in datasets; do you have a repeat in lang_pairs?"
             return SampledMultiDataset(
                 OrderedDict(datasets),
                 epoch=epoch,

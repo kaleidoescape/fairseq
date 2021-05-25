@@ -10,6 +10,21 @@
 
 --------------------------------------------------------------------------------
 
+# KaleidoEscape's Fork
+
+Warning! This fork is an experimental fork and may be broken!
+
+## Changes
+
+### Multilingual Sinkhorn-Knopp Temperature sampling
+
+Support for Sinkhorn-Knopp temperature sampling added in `fairseq/data/multilingual/`. 
+Requires: [https://github.com/kaleidoescape/sinkhorn_knopp](https://github.com/kaleidoescape/sinkhorn_knopp)
+Motivation (see section 3.4): [https://arxiv.org/abs/2010.11125](https://arxiv.org/abs/2010.11125)
+
+
+--------------------
+
 Fairseq(-py) is a sequence modeling toolkit that allows researchers and
 developers to train custom models for translation, summarization, language
 modeling and other text generation tasks.
