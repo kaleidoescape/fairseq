@@ -76,6 +76,7 @@ class MultilingualDatasetManager(object):
         self.lang_dict = self.create_lang_dictionary(self.langs)
         self.sampling_method = sampling_method
         self.sampling_scheduler = None
+        self.lang_probs = None 
         self._has_sharded_data = False
         self._num_shards_dict = {}
         self._training_data_sizes = defaultdict(lambda: {})
@@ -605,6 +606,7 @@ class MultilingualDatasetManager(object):
         langpairs_sharing_datasets=None,
     ):
         norm_direction = "-".join(sorted([src, tgt]))
+        logger.info(f"Loading {norm_direction}")
         if langpairs_sharing_datasets is not None:
             src_dataset = langpairs_sharing_datasets.get(
                 (data_path, split, norm_direction, src), "NotInCache"
@@ -1001,45 +1003,27 @@ class MultilingualDatasetManager(object):
         )
         return [s for _, s in data_sizes]
 
-    def get_train_sampling_ratios(
-        self, data_param_list, datasets, epoch=1, shard_epoch=None
-    ):
-        data_sizes = self.get_train_dataset_sizes(
-            data_param_list, datasets, epoch, shard_epoch
-        )
-        sampling_func = self.sampling_method.sampling_method_selector()
-        sample_ratios = sampling_func(data_sizes) if sampling_func is not None else None
-        return sample_ratios
-
-    def get_train_sampling_sinkhorn_ratios(
-        self, data_param_list, datasets, epoch=1, shard_epoch=None
-    ):
-        data_sizes = self.get_train_dataset_sizes(
-            data_param_list, datasets, epoch, shard_epoch
-        )
-        sampling_func = self.sampling_method.sampling_method_selector()
-
-        sample_ratios = sampling_func(self.langs, data_param_list, data_sizes) 
-        return sample_ratios
-
     def get_sampling_ratios(self, data_param_list, datasets, epoch, shard_epoch=None):
         if self.args.sampling_weights_from_file:
             weights = load_sampling_weights(self.args.sampling_weights_from_file)
             sample_ratios = [weights[k] for k, _ in datasets]
             logger.info(
-                "| ignoring --sampling-weights when loading sampling weights "
-                f"from file {self.args.sampling_weights_from_file}"
+                "| ignoring --sampling-weights and --sampling-method when "
+                "loading sampling weights from file "
+                f"{self.args.sampling_weights_from_file}"
             )
         elif self.args.sampling_weights:
             sample_ratios = [self.args.sampling_weights[k] for k, _ in datasets]
-        elif self.args.sampling_method == 'sinkhorn':
-            sample_ratios = self.get_train_sampling_sinkhorn_ratios(
-                data_param_list, datasets, epoch, shard_epoch
-            )
         else:
-            sample_ratios = self.get_train_sampling_ratios(
+            data_sizes = self.get_train_dataset_sizes(
                 data_param_list, datasets, epoch, shard_epoch
             )
+            sampling_func = self.sampling_method.sampling_method_selector()
+            if sampling_func is not None:
+                sample_ratios, probs = sampling_func(
+                    self.langs, data_param_list, data_sizes
+                ) 
+                self.lang_probs = probs
 
         if sample_ratios is not None:
             logger.info(
